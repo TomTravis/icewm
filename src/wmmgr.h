@@ -29,6 +29,7 @@ public:
     virtual void handleDNDEnter();
     virtual void handleDNDLeave();
     void setGeometry();
+    int destination();
 private:
     YWindowManager *fManager;
     Cursor fCursor;
@@ -123,6 +124,7 @@ public:
     void manageClient(YFrameClient* client, bool mapClient = false);
     void unmanageClient(YFrameClient *client);
     void clientDestroyed(YFrameClient* client);
+    void clientTransfered(YFrameClient* client, YFrameWindow* frame);
     void destroyedClient(Window win);
     void mapClient(Window win);
 
@@ -320,6 +322,7 @@ public:
     bool switchWindowVisible() const;
     SwitchWindow* getSwitchWindow();
     Window netActiveWindow() const { return fActiveWindow; }
+    int edgeWorkspace(int x, int y);
 
 private:
     struct WindowPosState {

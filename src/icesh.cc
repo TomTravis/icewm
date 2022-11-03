@@ -198,6 +198,7 @@ static NAtom ATOM_ICE_DOCKAPPS("_ICEWM_DOCKAPPS");
 static NAtom ATOM_ICE_WINOPT("_ICEWM_WINOPTHINT");
 static NAtom ATOM_MOTIF_HINTS(_XA_MOTIF_WM_HINTS);
 static NAtom ATOM_NET_CLIENT_LIST("_NET_CLIENT_LIST");
+static NAtom ATOM_NET_CLIENT_LIST_STACKING("_NET_CLIENT_LIST_STACKING");
 static NAtom ATOM_NET_CLOSE_WINDOW("_NET_CLOSE_WINDOW");
 static NAtom ATOM_NET_ACTIVE_WINDOW("_NET_ACTIVE_WINDOW");
 static NAtom ATOM_NET_FRAME_EXTENTS("_NET_FRAME_EXTENTS");
@@ -1117,8 +1118,13 @@ public:
                     }
                 }
                 else if (prop.type() == XA_ATOM) {
-                    if (propertyValue && propertyValue == Atom(*prop)) {
-                        match = true;
+                    if (propertyValue) {
+                        for (long i = 0; i < prop.count(); ++i) {
+                            if (propertyValue == Atom(prop[i])) {
+                                match = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1303,6 +1309,25 @@ public:
         }
     }
 
+    void stacking() {
+        YWindowTree stack;
+        stack.getWindowList(ATOM_NET_CLIENT_LIST_STACKING);
+        if (stack) {
+            std::sort(fChildren.begin(), fChildren.end(),
+                      [&stack](Window &a, Window &b){
+                return
+                    std::find(stack.fChildren.begin(),
+                              stack.fChildren.end(), a) >
+                    std::find(stack.fChildren.begin(),
+                              stack.fChildren.end(), b);
+            });
+        }
+    }
+
+    void reverse() {
+        std::reverse(fChildren.begin(), fChildren.end());
+    }
+
 private:
     Confine fConfine;
     Window fParent;
@@ -1317,6 +1342,8 @@ YTreeLeaf* YTreeIter::operator->() { return fTree.leaf(fIndex); }
 
 #define FOREACH_WINDOW(W) \
     for (YTreeIter W(windowList); W; ++W)
+#define CHANGES_WINDOW(W) \
+    for (YTreeIter W(windowList); use(W); modified(W), ++W)
 
 /******************************************************************************/
 
@@ -1344,7 +1371,7 @@ private:
     vector<YWindowTree> trees;
     vector<Window> modifications;
 
-    void use(Window w);
+    bool use(Window w);
     void modified(Window w);
     void spy();
     void spyEvent(const XEvent& event);
@@ -1405,7 +1432,7 @@ private:
     bool runonce();
     void click();
     bool delay();
-    void tabTo(const char* arg);
+    void tabTo(char* arg);
     void monitors();
     bool desktops();
     bool desktop();
@@ -1701,6 +1728,19 @@ static Window getFrameWindow(Window window)
     return None;
 }
 
+static int countTabs(Window frame) {
+    YWindowTree windowList(frame);
+    int count = 0;
+    FOREACH_WINDOW(window)
+        if (window->wmName() == "Container")
+            ++count;
+    return count;
+}
+
+static bool isTabbed(Window client) {
+    return countTabs(getFrameWindow(client)) > 1;
+}
+
 static Window getGroupLeader(Window window) {
     Window lead = None;
     YClient prop(window, ATOM_WM_CLIENT_LEADER);
@@ -1790,13 +1830,14 @@ void IceSh::catcher(int)
     running = false;
 }
 
-void IceSh::use(Window window)
+bool IceSh::use(Window window)
 {
-    if (contains(modifications, window)) {
+    if (window && contains(modifications, window)) {
         sync();
         fsleep(0.1);
         modifications.clear();
     }
+    return window;
 }
 
 void IceSh::modified(Window window)
@@ -2224,7 +2265,7 @@ void IceSh::setWindowType(const char* arg)
                 char buf[99] = "_NET_WM_WINDOW_TYPE_";
                 strlcat(buf, types[i], sizeof buf);
                 NAtom atom(buf);
-                FOREACH_WINDOW(window) {
+                CHANGES_WINDOW(window) {
                     setAtom(window, ATOM_NET_WM_WINDOW_TYPE, atom);
                 }
                 break;
@@ -2500,6 +2541,7 @@ void IceSh::changeState(const char* arg)
 void IceSh::changeState(int state, Window window) {
     use(window);
     send(ATOM_WM_CHANGE_STATE, window, state, None);
+    modified(window);
 }
 
 void IceSh::changeState(int state) {
@@ -3129,7 +3171,7 @@ void IceSh::motif(Window window, char** args, int count) {
 }
 
 void IceSh::setBorderTitle(int border, int title) {
-    FOREACH_WINDOW(window) {
+    CHANGES_WINDOW(window) {
         YMotifHints hints(window);
         MwmHints mwm;
         if (hints) {
@@ -3395,7 +3437,33 @@ void IceSh::flush()
         throw 1;
 }
 
-void IceSh::tabTo(const char* label)
+static void randomSetup() {
+    static unsigned seed;
+    if (seed == 0) {
+        timeval now = walltime();
+        seed = unsigned((getpid() * now.tv_usec) ^ now.tv_sec);
+        srand(seed);
+    }
+}
+
+static char* randomLabel() {
+    static const char data[] =
+        "abcdefghijklmnopqrstuvwxyz-12345"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ_67890";
+    const int length = 7;
+    static char label[length + 1];
+    randomSetup();
+    for (int i = 0, r = 0; i < length; ++i) {
+        if (r < 32)
+            r = rand();
+        label[i] = data[r & 63];
+        r >>= 6;
+    }
+    label[length] = '\0';
+    return label;
+}
+
+void IceSh::tabTo(char* defaultLabel)
 {
     if ( ! windowList && ! selecting) {
         Window pick = pickWindow();
@@ -3404,7 +3472,10 @@ void IceSh::tabTo(const char* label)
         setWindow(pick);
         selecting = true;
     }
-    FOREACH_WINDOW(window) {
+    CHANGES_WINDOW(window) {
+        if (defaultLabel == nullptr && isTabbed(window) == false)
+            continue;
+
         XClassHint h = { nullptr, nullptr };
         bool xgot = (XGetClassHint(display, window, &h) == True);
         YStringProperty role(window, ATOM_WM_WINDOW_ROLE);
@@ -3419,6 +3490,7 @@ void IceSh::tabTo(const char* label)
                       + (str2 ? strlen(str2) : 0);
         XWindowAttributes attr = {};
         if (length && XGetWindowAttributes(display, window, &attr)) {
+            char* label = defaultLabel ? defaultLabel : randomLabel();
             size_t size = length + 10 + strlen(label);
             char* buf = new char[size];
             if (buf) {
@@ -4376,8 +4448,10 @@ void IceSh::parseAction()
                 setGeometry(window, geometry);
         }
         else if (isAction("getGeometry", 0)) {
-            FOREACH_WINDOW(window)
+            FOREACH_WINDOW(window) {
+                use(window);
                 getGeometry(window);
+            }
         }
         else if (isAction("resize", 2)) {
             const char* ws = getArg();
@@ -4591,6 +4665,7 @@ void IceSh::parseAction()
         else if (isAction("getWorkspace", 0)) {
             WorkspaceInfo info;
             FOREACH_WINDOW(window) {
+                use(window);
                 int ws = int(getWorkspace(window));
                 const char* name = info ? info[ws] : "";
                 printf("0x%-7lx %d \"%s\"\n", Window(window), ws, name);
@@ -4625,7 +4700,7 @@ void IceSh::parseAction()
             check(layers, layer, argp[-1]);
 
             MSG(("setLayer: %d", layer));
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 setLayer(window, layer);
         }
         else if (isAction("getLayer", 0)) {
@@ -4685,8 +4760,10 @@ void IceSh::parseAction()
                 printf("0x%07lx\n", Window(window));
         }
         else if (isAction("frame", 0)) {
-            FOREACH_WINDOW(window)
+            FOREACH_WINDOW(window) {
+                use(window);
                 printf("0x%07lx\n", getFrameWindow(window));
+            }
         }
         else if (isAction("pid", 0)) {
             FOREACH_WINDOW(window) {
@@ -4706,23 +4783,23 @@ void IceSh::parseAction()
             spy();
         }
         else if (isAction("close", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 closeWindow(window);
         }
         else if (isAction("kill", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 XKillClient(display, window);
         }
         else if (isAction("activate", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 activateWindow(window);
         }
         else if (isAction("raise", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 raiseWindow(window);
         }
         else if (isAction("lower", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 lowerWindow(window);
         }
         else if (isAction("fullscreen", 0)) {
@@ -4740,27 +4817,27 @@ void IceSh::parseAction()
             }
         }
         else if (isAction("minimize", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 YNetState(window) += NetHidden;
         }
         else if (isAction("vertical", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 YNetState(window) += NetVertical;
         }
         else if (isAction("horizontal", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 YNetState(window) += NetHorizontal;
         }
         else if (isAction("rollup", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 YNetState(window) += NetShaded;
         }
         else if (isAction("above", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 YNetState(window) += NetAbove;
         }
         else if (isAction("below", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 YNetState(window) += NetBelow;
         }
         else if (isAction("urgent", 0)) {
@@ -4774,11 +4851,11 @@ void IceSh::parseAction()
             changeState(NormalState);
         }
         else if (isAction("xmap", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 XMapWindow(display, window);
         }
         else if (isAction("xunmap", 0)) {
-            FOREACH_WINDOW(window)
+            CHANGES_WINDOW(window)
                 XUnmapWindow(display, window);
         }
         else if (isAction("xmove", 2)) {
@@ -4958,6 +5035,15 @@ void IceSh::parseAction()
         }
         else if (isAction("tabto", 1)) {
             tabTo(getArg());
+        }
+        else if (isAction("untab", 0)) {
+            tabTo(nullptr);
+        }
+        else if (isAction("stacking", 0)) {
+            windowList.stacking();
+        }
+        else if (isAction("reverse", 0)) {
+            windowList.reverse();
         }
         else {
             msg(_("Unknown action: `%s'"), *argp);

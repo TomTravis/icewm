@@ -315,7 +315,7 @@ bool YWindowManager::handleTimer(YTimer* timer) {
 
 void YWindowManager::handlePopDown(YPopupWindow* popup) {
     if (popup == fSwitchWindow) {
-        fSwitchDownTimer->setTimer(3000, this, true);
+        fSwitchDownTimer->setTimer(30000, this, true);
     }
 }
 
@@ -1062,7 +1062,9 @@ void YWindowManager::setFocus(YFrameWindow *f, bool canWarp, bool reorder) {
         else
             w = f->handle();
 
-        if (f->getInputFocusHint())
+        if (f->getInputFocusHint() ||
+                ((f->isRollup() || f->isFullscreen())
+                    && !f->avoidFocus()))
             switchFocusTo(f, reorder);
 
         f->setWmUrgency(false);
@@ -1083,7 +1085,9 @@ void YWindowManager::setFocus(YFrameWindow *f, bool canWarp, bool reorder) {
     }
 #endif
 
-    bool focusUnset(fFocusWin == nullptr || fFocusWin->visible() == false);
+    bool focusUnset(fFocusWin == nullptr ||
+                    fFocusWin->visible() == false ||
+                    fFocusWin->isRollup());
     if (w != None) {
         if (f->getInputFocusHint()) {
             XSetInputFocus(xapp->display(), w, RevertToNone,
@@ -1278,6 +1282,8 @@ void YWindowManager::manageClients() {
                         }
                         fCreatedUpdated = fLayeredUpdated = true;
                         res->frame->createTab(client, pos);
+                        if (fSwitchWindow)
+                            fSwitchWindow->createdClient(res->frame, client);
                     } else {
                         manageClient(client);
                         if (client->getFrame() == nullptr) {
@@ -1917,7 +1923,7 @@ void YWindowManager::manageClient(YFrameClient* client, bool mapClient) {
             if (requestFocus && frame->avoidFocus() == false)
                 frame->setWmUrgency(true);
         }
-        if (switchWindowVisible())
+        if (fSwitchWindow)
             fSwitchWindow->createdFrame(frame);
     }
 }
@@ -1966,6 +1972,8 @@ void YWindowManager::mapClient(Window win) {
                         frame->createTab(client, place);
                         if (client->activateOnMap())
                             frame->selectTab(client);
+                        if (fSwitchWindow)
+                            fSwitchWindow->createdClient(frame, client);
                         client = nullptr;
                         break;
                     }
@@ -2016,8 +2024,14 @@ void YWindowManager::clientDestroyed(YFrameClient* client) {
     fCreatedUpdated = fLayeredUpdated = true;
     if (notShutting())
         updateClientList();
-    if (switchWindowVisible())
-        getSwitchWindow()->destroyedClient(client);
+    if (fSwitchWindow)
+        fSwitchWindow->destroyedClient(client);
+}
+
+void YWindowManager::clientTransfered(YFrameClient* client, YFrameWindow* frame) {
+    fLayeredUpdated = true;
+    if (fSwitchWindow)
+        fSwitchWindow->transfer(client, frame);
 }
 
 void YWindowManager::destroyedClient(Window win) {
@@ -3256,7 +3270,7 @@ void YWindowManager::removeClientFrame(YFrameWindow *frame) {
             setColormapWindow(getFocus());
         if (frame->affectsWorkArea())
             updateWorkArea();
-        if (switchWindowVisible())
+        if (fSwitchWindow)
             fSwitchWindow->destroyedFrame(frame);
     }
 }
@@ -3650,6 +3664,13 @@ void YWindowManager::handleMsgBox(YMsgBox *msgbox, int operation) {
     delete msgbox;
 }
 
+int YWindowManager::edgeWorkspace(int x, int y) {
+    for (auto edge : edges)
+        if (edge->visible() && edge->geometry().contains(x, y))
+            return edge->destination();
+    return -1;
+}
+
 EdgeSwitch::EdgeSwitch(YWindowManager *manager, int delta, bool vertical):
     YDndWindow(desktop),
     fManager(manager),
@@ -3702,10 +3723,7 @@ void EdgeSwitch::handleDNDLeave() {
     }
 }
 
-bool EdgeSwitch::handleTimer(YTimer *t) {
-    if (t != fEdgeSwitchTimer)
-        return false;
-
+int EdgeSwitch::destination() {
     int worksps = workspaceCount;
     int orient  = fManager->layout().orient;
     int columns = min(fManager->layout().columns, worksps);
@@ -3744,7 +3762,8 @@ bool EdgeSwitch::handleTimer(YTimer *t) {
     do {
         if (0 == --end) {
             tlog("inflp");
-            goto end;
+            wsp = -1;
+            break;
         }
 
         col = (col + dx + columns) % columns;
@@ -3752,21 +3771,24 @@ bool EdgeSwitch::handleTimer(YTimer *t) {
         wsp = col + row * columns;
     } while (wsp >= worksps);
 
-    fManager->switchToWorkspace(wsp, false);
+    return wsp;
+}
 
-    if (warpPointerOnEdgeSwitch) {
-        int dest_x = -fDelta * !fVert * (desktop->width() - 5);
-        int dest_y = -fDelta * fVert * (desktop->height() - 5);
-        XWarpPointer(xapp->display(), None, None, 0, 0, 0, 0,
-                     dest_x, dest_y);
+bool EdgeSwitch::handleTimer(YTimer *t) {
+    if (t == fEdgeSwitchTimer) {
+        int ws = destination();
+        if (0 <= ws) {
+            fManager->switchToWorkspace(ws, false);
+            if (warpPointerOnEdgeSwitch) {
+                int dx = -fDelta * !fVert * (desktop->width() - 5);
+                int dy = -fDelta * fVert * (desktop->height() - 5);
+                XWarpPointer(xapp->display(), None, None, 0, 0, 0, 0, dx, dy);
+            }
+            if (edgeContWorkspaceSwitching)
+                return true;
+        }
+        setPointer(YWMApp::leftPointer);
     }
-
-    if (edgeContWorkspaceSwitching) {
-        return true;
-    }
-
-end:
-    setPointer(YWMApp::leftPointer);
     return false;
 }
 
