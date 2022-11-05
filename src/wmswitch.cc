@@ -149,10 +149,23 @@ public:
         return null;
     }
 
-    void setWMClass(char* wmclass) override {
+    int getWorkspace(int idx) override {
+        int ws = 0;
+        if (inrange(idx, 0, getCount() - 1)) {
+            ws = zList[idx].frame->getWorkspace();
+            if (ws == AllWorkspaces)
+                ws = manager->activeWorkspace();
+        }
+        return ws;
+    }
+
+    bool setWMClass(char* wmclass) override {
+        char nil[] = { '\0' };
+        bool change = strcmp(Elvis(wmclass, nil), Elvis(fWMClass, nil));
         if (fWMClass)
             free(fWMClass);
         fWMClass = wmclass;
+        return change;
     }
 
     char* getWMClass() override {
@@ -355,7 +368,8 @@ void WindowItemsCtrlr::updateList() {
 }
 
 void WindowItemsCtrlr::sort() {
-    qsort(&*zList, size_t(zList.getCount()), sizeof(ZItem), ZItem::compare);
+    if (1 < zList.getCount())
+        qsort(&*zList, size_t(zList.getCount()), sizeof(ZItem), ZItem::compare);
 
     zTarget = 0;
     if (fActiveItem) {
@@ -462,7 +476,7 @@ void SwitchWindow::resize(int xiscreen, bool reposition) {
     int w = aWidth;
     int h = switchFont ? switchFont->height() : 1;
     int const mWidth(dw * 6/7);
-    const int vMargins = quickSwitchVMargin*2;
+    const int vMargins = 2 * max(quickSwitchVMargin, quickSwitchIMargin);
 
     if (m_verticalStyle) {
         w = aWidth;
@@ -576,9 +590,9 @@ void SwitchWindow::paintHorizontal(Graphics &g) {
                 const int x(quickSwitchTextFirst ? width() - ip : ip);
 
                 g.setColor(switchBg->darker());
-                g.drawLine(x + 0, 1, x + 0, width() - 2);
+                g.drawLine(x + 0, 1, x + 0, height() - 2);
                 g.setColor(switchBg->brighter());
-                g.drawLine(x + 1, 1, x + 1, width() - 2);
+                g.drawLine(x + 1, 1, x + 1, height() - 2);
             }
         }
 
@@ -720,15 +734,21 @@ void SwitchWindow::paintVertical(Graphics &g) {
                 ? maxWid - iconSize - quickSwitchSepSize/2 - 1
                         :  contentX + iconSize + quickSwitchSepSize/2 - 1;
 
-        int contentY = quickSwitchVMargin;
+        int contentY = quickSwitchVMargin + quickSwitchIBorder;
 
         if (switchFont) {
             g.setFont(switchFont);
         }
         g.setColor(switchFg);
         for (int i = 0, zCount = zItems->getCount(); i < zCount; i++) {
-            if (contentY + frameHght > (int) height())
+            if (contentY + frameHght > int(quickSwitchIBorder + height()))
                 break;
+            if (i > 0 && zItems->getWorkspace(i) != zItems->getWorkspace(i-1)) {
+                g.setColor(switchBg->darker());
+                g.drawLine(1, contentY - 4, width() - 2, contentY - 4);
+                g.setColor(switchBg->brighter());
+                g.drawLine(1, contentY - 3, width() - 2, contentY - 3);
+            }
             if (i == zItems->getActiveItem()) {
                 g.setColor(switchMbg);
                 g.fillRect(frameX, contentY-quickSwitchIBorder, frameWid, frameHght);
@@ -768,13 +788,12 @@ void SwitchWindow::paintVertical(Graphics &g) {
 }
 
 void SwitchWindow::begin(bool zdown, unsigned mods, char* wmclass) {
+    bool change = zItems->setWMClass(wmclass);
     modsDown = KEY_MODMASK(mods);
-    zItems->setWMClass(wmclass);
-
     m_oldMenuMouseTracking = menuMouseTracking;
     menuMouseTracking = true;
 
-    if (zItems->getCount() == 0 ||
+    if (zItems->isEmpty() || change ||
         (fWorkspace != manager->activeWorkspace() &&
          !quickSwitchToAllWorkspaces)) {
         zItems->begin(zdown);
@@ -888,7 +907,13 @@ bool SwitchWindow::handleKey(const XKeyEvent &key) {
             accept();
         }
         else if (manager->handleSwitchWorkspaceKey(key, k, vm)) {
-            zItems->sort();
+            bool change = (fWorkspace != manager->activeWorkspace());
+            fWorkspace = manager->activeWorkspace();
+            if (change && !quickSwitchToAllWorkspaces) {
+                zItems->updateList();
+            } else {
+                zItems->sort();
+            }
             if (zItems->getCount()) {
                 resize(getScreen(), true);
                 repaint();
